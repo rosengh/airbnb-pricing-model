@@ -1,0 +1,444 @@
+---
+title: "Asm 2 draft 2"
+author: "Rose Nguyen"
+date: "2025-04-21"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#question 1: 
+library(readxl)
+library(dplyr)
+df <- read_excel("~/Desktop/a.UNSW/ACTL3142/Dataset/AirbnbSydneyV2.xlsx")
+
+review_cols <- c("review_scores_rating", "review_scores_accuracy",
+                 "review_scores_cleanliness", "review_scores_checkin",
+                 "review_scores_communication", "review_scores_location",
+                 "review_scores_value")
+df$avg_score <- rowMeans(df[review_cols], na.rm = TRUE)
+
+df <- df %>%
+  mutate(HAS = ifelse(avg_score >4.9, 1, 0))
+mean(df$HAS, na.rm = TRUE)
+
+df$region <- case_when(
+      df$neighbourhood %in% c("Sydney", "North Sydney", "Waverley", "Woollahra") ~ "CBD",
+      df$neighbourhood %in% c("Randwick", "Canada Bay") ~ "Eastern Suburbs",
+      df$neighbourhood %in% c("Pittwater", "Warringah") ~ "Northern Beaches",
+      df$neighbourhood %in% c("Auburn", "Campbelltown", "Liverpool", "Bankstown", "Blacktown", "Parramatta") ~ "Western Sydney",
+      df$neighbourhood %in% c("Mosman", "Lane Cove", "Willoughby", "Ku-Ring-Gai") ~ "Lower North Shore",
+      df$neighbourhood %in% c("Sutherland Shire", "Rockdale", "Botany Bay") ~ "South Sydney",
+      df$neighbourhood %in% c("Camden", "Penrith") ~ "Outskirts",
+      TRUE ~ "Other"
+    )
+df$region <- as.factor(df$region)
+
+library(stringr)
+df <- df %>%
+  mutate(
+    property_group = case_when(
+      str_detect(property_type, "Entire") ~ "Entire_home",
+      str_detect(property_type, "Private") ~ "Private_room",
+      str_detect(property_type, "Shared") ~ "Shared_space",
+      str_detect(property_type, "Hotel|Motel|Boutique") ~ "Hotel",
+      TRUE ~ "Others"
+    )
+  )
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Calculate proportions
+df %>%
+  mutate(HAS = as.factor(HAS)) %>%
+  count(HAS) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ggplot(aes(x = HAS, y = proportion, fill = HAS)) +
+  geom_col(width = 0.6) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Proportion of Listings with HAS = 1 vs HAS = 0",
+    x = "HAS (High Average Score)",
+    y = "Proportion"
+  ) +
+  scale_fill_manual(values = c("0" = "blue", "1" = "red")) +
+  theme_minimal()
+```
+
+We initially tested the significance of all available predictors using univariate analysis and model diagnostics. Based on this, we selected a refined set of variables and constructed df_model for consistency. This cleaned dataset improves model stability and avoids the convergence issues we faced when using the full variable set.
+```{r}
+#Question 2
+df2 <- df %>% select(-avg_score, -starts_with("review_scores"))
+df2$HAS <- as.factor(df2$HAS)
+
+selected_vars <- c(
+  "HAS", "host_is_superhost", "host_identity_verified", "host_has_profile_pic",
+  "number_of_reviews", "host_response_time",
+  "maximum_minimum_nights", "minimum_minimum_nights", "availability_30",
+  "availability_90", "latitude", "region", "bathrooms", "bedrooms",
+  "room_type", "instant_bookable", "availability_365", "price"
+)
+```
+
+```{r}
+library(ISLR2)
+library(caTools)
+library(dplyr)
+library(caret)
+df_model <- df2 %>%
+  select(selected_vars)
+
+# Remove any NAs
+df_model <- na.omit(df_model)
+
+# Ensure factors are encoded correctly (especially for lasso + glmnet)
+df_model$host_is_superhost <- as.factor(df_model$host_is_superhost)
+df_model$host_identity_verified <- as.factor(df_model$host_identity_verified)
+df_model$host_has_profile_pic <- as.factor(df_model$host_has_profile_pic)
+df_model$host_response_time <- as.factor(df_model$host_response_time)
+df_model$room_type <- as.factor(df_model$room_type)
+df_model$instant_bookable <- as.factor(df_model$instant_bookable)
+df_model$region <- as.factor(df_model$region)
+
+#split data to train and test 
+# Use df_model directly
+set.seed(3142)
+train_index <- createDataPartition(df_model$HAS, p = 0.7, list = FALSE)
+train_model <- df_model[train_index, ]
+test_model <- df_model[-train_index, ]
+train_model <- na.omit(train_model)
+test_model <- na.omit(test_model)
+```
+
+```{r}
+library(car)
+#logis model
+main_formula <- paste(selected_vars, collapse = " + ")
+
+# Add interaction terms
+interactions <- c("bathrooms*bedrooms" ,
+                    "room_type*price" , 
+                    "region*host_is_superhost" , 
+                    "availability_90*number_of_reviews")
+
+# Final formula
+full_formula <- as.formula(paste("HAS ~", paste(c(main_formula, interactions), collapse = " + ")))
+
+# Fit the logistic model
+logis_model <- glm(HAS~ host_is_superhost + host_identity_verified + host_has_profile_pic +
+number_of_reviews + host_response_time + 
+maximum_minimum_nights + minimum_minimum_nights + availability_30 +
+availability_90 + latitude + region + bathrooms + bedrooms +
+room_type + instant_bookable + availability_365 + price + bathrooms*bedrooms +
+room_type*price + region*host_is_superhost + availability_90*number_of_reviews, data = train_model, family = "binomial")
+summary(logis_model)
+vif(logis_model)
+```
+
+```{r}
+#evaluate logistic model
+#predict on test set 
+X_train <- model.matrix(full_formula, data = train_model)
+y_train <- train_model$HAS
+
+X_test <- model.matrix(full_formula, data = test_model)
+prob_logis_test <- predict(logis_model, newdata = test_model, type = "response")
+pred_logis_test <- ifelse(prob_logis_test > 0.5, 1, 0)
+summary(prob_logis_test)
+library(caret)
+confusionMatrix(as.factor(pred_logis_test), as.factor(test_model$HAS), positive = "1")
+
+as.matrix(coef(logis_model))
+
+# AUC for Logistic
+library(pROC)
+roc_logis <- roc(test_model$HAS, prob_logis_test)
+plot(roc_logis)
+auc(roc_logis)
+
+```
+
+```{r}
+library(glmnet)
+X_train <- model.matrix(HAS ~ ., data = train_model)[, -1]  # remove intercept
+y_train <- train_model$HAS
+
+#lasso deviance 
+cv_lasso_dev <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1)
+plot(cv_lasso_dev)
+#lasso_error_rate
+cv_lasso_err <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, type.measure = "class")
+plot(cv_lasso_err)
+
+best_lambda_dev <- cv_lasso_dev$lambda.min
+best_lambda_err <- cv_lasso_err$lambda.min
+#compare 2 lasso model
+model_lasso_dev <- glmnet(X_train, y_train, family = "binomial", lambda = best_lambda_dev)
+summary(model_lasso_dev)
+
+model_lasso_err <- glmnet(X_train, y_train, family = "binomial", lambda = best_lambda_err)
+summary(model_lasso_err)
+```
+
+```{r}
+#evaluation 
+#evaluate lasso model accuracy
+X_test <- model.matrix(HAS ~ ., data = test_model)[, -1]
+
+# Predict probabilities
+pred_lasso_prob <- predict(model_lasso_dev, newx = X_test, type = "response")
+
+# Convert to class predictions
+pred_lasso <- ifelse(pred_lasso_prob > 0.5, 1, 0)
+
+# Confusion matrix
+confusionMatrix(as.factor(pred_lasso), as.factor(test_model$HAS), positive = "1")
+roc_lasso <- roc(test_model$HAS, pred_lasso_prob)
+plot(roc_lasso)
+auc(roc_lasso)
+as.matrix(coef(model_lasso_dev))
+```
+
+```{r}
+library(rpart)
+library(pROC)
+library(caret)
+
+# 1. Fit full tree on training data
+tree_full <- rpart(HAS ~ ., data = train_model, method = "class", 
+                   control = rpart.control(cp = 0.001))  # small cp to grow a big tree
+
+# 2. Find optimal cp that minimizes cross-validation error
+best_cp <- tree_full$cptable[which.min(tree_full$cptable[,"xerror"]), "CP"]
+
+# 3. Prune the tree using best cp
+tree_pruned <- prune(tree_full, cp = best_cp)
+plot(tree_pruned, uniform = TRUE, margin = 0.1)
+text(tree_pruned, use.n = TRUE, cex = 0.6)
+
+# 4. Make sure factor levels in test match training (to avoid prediction errors)
+for (col in names(test_model)) {
+  if (is.factor(test_model[[col]])) {
+    levels(test_model[[col]]) <- levels(train_model[[col]])
+  }
+}
+
+# 5. Predict probabilities for class = "1"
+pred_tree_prob <- predict(tree_pruned, newdata = test_model, type = "prob")[,2]
+
+# 6. Convert to class predictions
+pred_tree_class <- ifelse(pred_tree_prob > 0.5, 1, 0)
+
+# 7. Confusion matrix
+confusionMatrix(as.factor(pred_tree_class), as.factor(test_model$HAS), positive = "1")
+
+# 8. ROC and AUC
+roc_tree <- roc(test_model$HAS, pred_tree_prob)
+plot(roc_tree)
+auc(roc_tree)
+
+```
+```{r}
+#Q5: 
+library(tidyverse)
+library(glmnet)
+library(caret)
+
+df_q5 <- df2 %>%
+  mutate(log_price = log(price)) %>%
+  select(-price) %>%
+  select(-neighbourhood)
+  na.omit(df2)
+
+factor_vars <- names(df_q5)[sapply(df_q5, is.character)]
+df_q5[factor_vars] <- lapply(df_q5[factor_vars], factor)
+
+set.seed(3142)
+train_index <- createDataPartition(df_q5$log_price, p = 0.7, list = FALSE)
+train <- df_q5[train_index, ]
+test <- df_q5[-train_index, ]
+
+#make sure the predict run for same variables library(ggplot2)
+
+
+
+for (col in names(test)) {
+  if (is.factor(test[[col]])) {
+    test[[col]] <- factor(test[[col]], levels = levels(train[[col]]))
+  }
+}
+```
+
+```{r}
+#set a naive model for benchmark 
+mean_price <- mean(train$log_price)
+naive_pred <- rep(mean_price, nrow(test))
+rmse_naive <- sqrt(mean((exp(naive_pred) - exp(test$log_price))^2))  # RMSE on original scale
+mean_price 
+rmse_naive
+```
+
+
+```{r}
+lm_model2 <- lm(log_price ~ bathrooms + bedrooms + accommodates + 
+    longitude + latitude + HAS + property_group + region + host_response_time + 
+    instant_bookable + accommodates * property_group, data = train, 
+    weights = 1/log_price)
+pred_lm2 <- predict(lm_model2, newdata = test)
+ggplot(data = test, aes(x = log_price, y = pred_lm2)) +
+  geom_point(alpha = 0.3, color = "darkblue") + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    x = "Actual log(Price)",
+    y = "Predicted log(Price)",
+    title = "linear model predict") 
+
+rmse_lm2 <- sqrt(mean((exp(pred_lm2) - exp(test$log_price))^2))
+print(rmse_lm2)
+```
+
+
+```{r}
+summary(train$log_price)
+any(is.infinite(train$log_price))  # Should be FALSE
+any(is.na(train$log_price))        # Should be FALSE
+sapply(train, function(x) sum(is.na(x)))
+sapply(train[sapply(train, is.numeric)], function(x) sum(is.infinite(x)))
+train_clean <- train %>%
+  filter_all(all_vars(!is.na(.) & is.finite(.)))
+```
+
+```{r}
+glm_gamma <- glm(log_price ~ bathrooms + bedrooms + accommodates + 
+    longitude + latitude + HAS + property_group + region + host_response_time + 
+    instant_bookable + accommodates * property_group, data = train, family = Gamma(link = "log"), 
+    weights = 1/log_price)
+summary(glm_gamma)
+
+predicted <- predict(glm_gamma, newdata = test, type = "response")
+actual <- test$log_price
+
+plot(actual, predicted,
+     xlab = "actual price", ylab = "predicted price",
+     main = "GLM gamma model predict vs actual",
+     pch = 19, col = alpha("darkblue", 0.2))
+abline(0, 1, col = "red", lty = 2)
+
+rmse_gamma <- sqrt(mean((exp(predicted) - exp(actual))^2))
+rmse_gamma
+```
+
+
+```{r}
+# lasso
+X_train <- model.matrix(log_price ~ bathrooms + bedrooms + accommodates + 
+    longitude + latitude + HAS + property_group + region + host_response_time + 
+    instant_bookable + accommodates * property_group, data = train, 
+    weights = 1/log_price)[, -1]
+y_train <- train$log_price
+
+X_test <- model.matrix(log_price ~ bathrooms + bedrooms + accommodates + 
+    longitude + latitude + HAS + property_group + region + host_response_time + 
+    instant_bookable + accommodates * property_group, data = test, 
+    weights = 1/log_price)[, -1]
+y_test <- test$log_price
+
+# Cross-validated Lasso
+cv_lasso <- cv.glmnet(X_train, y_train, alpha = 1)
+pred_lasso <- predict(cv_lasso, newx = X_test, s = "lambda.min")
+
+rmse_lasso <- sqrt(mean((exp(pred_lasso) - exp(y_test))^2))
+rmse_lasso
+```
+```{r}
+ggplot(test, aes(x = exp(log_price), y = pred_lasso)) +
+  geom_point(alpha = 0.2) +
+  geom_line(data = test, aes(x = exp(log_price), y = pred_lasso), color = "red", size = 1) +
+  labs(title = "Lasso Predicting Model",
+       x = "Predict", y = "Actual") +
+  theme_minimal()
+
+```
+
+
+
+```{r}
+cv_ridge <- cv.glmnet(X_train, y_train, alpha = 0)
+pred_ridge <- predict(cv_ridge, newx = X_test, s = "lambda.min")
+rmse_ridge <- sqrt(mean((exp(pred_ridge) - exp(y_test))^2))
+rmse_ridge
+```
+```{r}
+ggplot(test, aes(x = exp(log_price), y = pred_ridge)) +
+  geom_point(alpha = 0.2) +
+  geom_line(data = test, aes(x = exp(log_price), y = pred_ridge), color = "darkblue", size = 1) +
+  labs(title = "Polynomial Regression (Degree 3)",
+       x = "Predict", y = "Actual") +
+  theme_minimal()
+```
+
+```{r}
+library(randomForest)
+rf_model <- randomForest(log_price ~ bathrooms + bedrooms + accommodates + 
+    longitude + latitude + HAS + property_group + region + host_response_time + 
+    instant_bookable + accommodates * property_group, data = train, ntree = 500)
+summary(rf_model)
+rf_pred <- predict(rf_model, newdata = test)
+rmse_rf <- sqrt(mean((exp(rf_pred) - exp(test$log_price))^2))
+rmse_rf
+```
+
+```{r}
+ggplot(test, aes(x = exp(log_price), y = rf_pred)) +
+  geom_point(alpha = 0.2) +
+  geom_line(data = test, aes(x = exp(log_price), y = rf_pred), color = "darkblue") +
+  labs(title = "RandomForest model predict",
+       x = "Predict", y = "Actual") +
+  theme_minimal()
+```
+
+
+```{r}
+final_table <- data.frame(
+  Model = c("Naive model", "Linear Regression", "Gamma GLM", "Lasso", "Ridge", "RandomForest"),
+  Test_RMSE = c(rmse_naive, rmse_lm2, rmse_gamma, rmse_lasso, rmse_ridge, rmse_rf)
+)
+#convert to mse
+final_table$Test_MSE <- final_table$Test_RMSE^2
+print(final_table)
+
+```
+```{r}
+library(readxl)
+df_q8 <- read_xlsx("~/Desktop/a.UNSW/ACTL3142/Dataset/AirbnbTest.xlsx")
+review_cols <- c("review_scores_rating", "review_scores_accuracy",
+                 "review_scores_cleanliness", "review_scores_checkin",
+                 "review_scores_communication", "review_scores_location",
+                 "review_scores_value")
+df_q8$avg_score <- rowMeans(df_q8[review_cols], na.rm = TRUE)
+
+df_q8 <- df_q8 %>%
+  mutate(HAS = ifelse(avg_score >4.9, 1, 0))
+
+common_vars <- intersect(names(train), names(df_q8))
+for (col in names(df_q8)) {
+  if (is.factor(train[[col]]) && col %in% names(df_q8)) {
+    df_q8[[col]] <- factor(df_q8[[col]], levels = levels(train[[col]]))
+  }
+}
+rf_model_q8 <- randomForest(log_price ~ ., data = train[, c(common_vars, "log_price")])
+df_q8$`price_prediction` <- exp(predict(rf_model_q8, newdata = df_q8))
+
+library(writexl)
+write_xlsx(df_q8, "AirbnbPrediction5508199.xlsx")
+
+```
+
